@@ -15,7 +15,7 @@ import struct
 import uuid
 import json
 
-PLAYER_PLATFORM = 2
+PLAYER_PLATFORMS = [11, 2, 1]
 PLAYER_VERSION = '3.2.19.333'
 """
 LEGACY FOR REFERENCE ONLY
@@ -93,11 +93,11 @@ def load_key():
 
 """
 
-def qq_get_final_url(url, vid, fmt_id, filename, fvkey):
+def qq_get_final_url(url, vid, fmt_id, filename, fvkey, platform):
     params = {
         'appver': PLAYER_VERSION,
         'otype': 'json',
-        'platform': PLAYER_PLATFORM,
+        'platform': platform,
         'filename': filename,
         'vid': vid,
         'format': fmt_id,
@@ -106,11 +106,14 @@ def qq_get_final_url(url, vid, fmt_id, filename, fvkey):
     content = get_content('http://vv.video.qq.com/getkey?' + urlencode(params))
     data = json.loads(match1(content, r'QZOutputJson=(.+);$'))
 
-    vkey = data.get('key')
-    if vkey is None:
-        vkey = fvkey
+    vkey = data.get('key', fvkey)
+    if vkey:
+        url = "{}{}?vkey={}".format(url, filename, vkey)
+    else:
+        url = None
+    vip = data.get('msg') == 'not pay'
 
-    return "{}{}?vkey={}".format(url, filename, vkey)
+    return url, vip
 
 
 
@@ -132,31 +135,44 @@ class QQ(VideoExtractor):
 
 
     def get_streams_info(self, profile='shd'):
-        params = {
-            'otype': 'json',
-            'platform': PLAYER_PLATFORM,
-            'vid': self.vid,
-            'defnpayver': 1,
-            'appver': PLAYER_VERSION,
-            'defn': profile,
-        }
+        for PLAYER_PLATFORM in PLAYER_PLATFORMS.copy():
+            params = {
+                'otype': 'json',
+                'platform': PLAYER_PLATFORM,
+                'vid': self.vid,
+                'defnpayver': 1,
+                'appver': PLAYER_VERSION,
+                'defn': profile,
+            }
 
-        content = get_content('http://vv.video.qq.com/getinfo?' + urlencode(params))
-        if profile == 'shd' and '"name":"shd"' not in content and '"name":"fhd"' not in content:
-            for infos in self.get_streams_info('hd'):
-                yield infos
-            return
-        else:
+            content = get_content('http://vv.video.qq.com/getinfo?' + urlencode(params))
             data = json.loads(match1(content, r'QZOutputJson=(.+);$'))
-        self.logger.debug('data: ' + str(data))
+            self.logger.debug('data: ' + str(data))
 
+            if 'msg' in data:
+                assert data['msg'] != 'vid status wrong', 'wrong vid'
+                PLAYER_PLATFORMS.remove(PLAYER_PLATFORM)
+                continue
+
+            if PLAYER_PLATFORMS and \
+                    profile == 'shd' and \
+                    '"name":"shd"' not in content and \
+                    '"name":"fhd"' not in content:
+                for infos in self.get_streams_info('hd'):
+                    yield infos
+                return
+            break
+
+        assert 'msg' not in data, data['msg']
+        #self.fp2p = data.get('fp2p')
         video = data['vl']['vi'][0]
         fn = video['fn']
         title = video['ti']
         td = float(video['td'])
-        fvkey = video['fvkey']
+        fvkey = video.get('fvkey')
         # Not to be absolutely accuracy.
-        self.vip = video['iflag']
+        self.vip = video['drm']
+        self.slow = not self.vip and (video['iflag'] or video['pl'])
 
         # Priority for range fetch.
         cdn_url_1 = cdn_url_2 = cdn_url_3 = None
@@ -164,14 +180,17 @@ class QQ(VideoExtractor):
             cdn_url = cdn['url']
             # 'video.dispatch.tc.qq.com' supported keep-alive link.
             if cdn_url == 'http://video.dispatch.tc.qq.com/':
-                cdn_url_1 = cdn_url
-                break
-            # IP host.
-            if match1(cdn_url, '(^https?://[0-9\.]+/)'):
                 cdn_url_3 = cdn_url
-            else:
-                cdn_url_2 = cdn_url
-        cdn_url = cdn_url_1 or cdn_url_2 or cdn_url_3 
+            # IP host.
+            elif match1(cdn_url, '(^https?://[0-9\.]+/)'):
+                if not cdn_url_2:
+                    cdn_url_2 = cdn_url
+            elif not cdn_url_1:
+                cdn_url_1 = cdn_url
+        if self.slow:
+            cdn_url = cdn_url_3 or cdn_url_1 or cdn_url_2
+        else:
+            cdn_url = cdn_url_1 or cdn_url_2 or cdn_url_3
 
         dt = cdn['dt']
         if dt == 1:
@@ -213,19 +232,22 @@ class QQ(VideoExtractor):
 
             if num_clips == 0:
                 filename = '.'.join(fns)
-                url = qq_get_final_url(cdn_url, self.vid, fmt_id, filename, fvkey)
-                urls.append(url)
+                url, vip = qq_get_final_url(cdn_url, self.vid, fmt_id, filename, fvkey, PLAYER_PLATFORM)
+                if vip:
+                    self.vip = vip
+                elif url:
+                    urls.append(url)
             else:
                 fns.insert(-1, '1')
                 for idx in range(1, num_clips+1):
                     fns[-2] = str(idx)
                     filename = '.'.join(fns)
-                    url = qq_get_final_url(cdn_url, self.vid, fmt_id, filename, fvkey)
-                    if url:
-                        urls.append(url)
-                    else:
-                        self.vip = True
+                    url, vip = qq_get_final_url(cdn_url, self.vid, fmt_id, filename, fvkey, PLAYER_PLATFORM)
+                    if vip:
+                        self.vip = vip
                         break
+                    elif url:
+                        urls.append(url)
 
             yield title, fmt_name, fmt_cname, type_name, urls, size, rate
 
@@ -239,29 +261,42 @@ class QQ(VideoExtractor):
 
         if not self.vid or len(self.vid) != 11:
             html = get_content(self.url)
-            self.vid = match1(html, 'vid:\s*[\"\'](\w+)', 'vid\s*=\s*[\"\']\s*(\w+)', 'vid=(\w+)')
+            self.vid = match1(html, '&vid=(\w+)', 'vid:\s*[\"\'](\w+)', 'vid\s*=\s*[\"\']\s*(\w+)')
 
             if not self.vid and '<body class="page_404">' in html:
                 self.logger.warning('This video has been deleted!')
                 return info
 
         video_rate = {}
-        for title, fmt_name, stream_profile, type_name, urls, size, rate in self.get_streams_info():
-            stream_id = self.stream_2_id[fmt_name]
-            if stream_id not in info.stream_types:
-                info.stream_types.append(stream_id)
-                info.streams[stream_id] = {'container': type_name, 'video_profile': stream_profile, 'src' : urls, 'size': size}
-                video_rate[stream_id] = rate
+        for _ in range(2):
+            try:
+                for title, fmt_name, stream_profile, type_name, urls, size, rate in self.get_streams_info():
+                    stream_id = self.stream_2_id[fmt_name]
+                    if urls and stream_id not in info.stream_types:
+                        info.stream_types.append(stream_id)
+                        info.streams[stream_id] = {'container': type_name, 'video_profile': stream_profile, 'src' : urls, 'size': size}
+                        video_rate[stream_id] = rate
+                break
+            except AssertionError as e:
+                if 'wrong vid' in str(e):
+                    html = get_content(self.url)
+                    self.vid = match1(html, '&vid=(\w+)', 'vid:\s*[\"\'](\w+)', 'vid\s*=\s*[\"\']\s*(\w+)')
+                    continue
+                raise e
+
+        if self.vip:
+            self.logger.warning('This is a VIP video!')
+            self.slow = False
+
+        assert len(info.stream_types), "can't play this video!!"
         info.stream_types = sorted(info.stream_types, key = self.stream_ids.index)
         info.title = title
 
-        # Downloading some videos is very slow, use multithreading range fetch to speed up.
-        # Only for video players now.
-        info.extra['rangefetch'] = {'first_size': 1024 * 16, 'max_size': 1024 * 32, 'threads': 10, 'video_rate': video_rate}
-
-        if self.vip:
-            info.extra['rangefetch']['threads'] = 14
-            self.logger.warning('This is a VIP video!')
+        if self.slow:
+            # Downloading some videos is very slow, use multithreading range fetch to speed up.
+            # Only for video players now.
+            info.extra['rangefetch'] = {'first_size': 1024 * 16, 'max_size': 1024 * 32, 'threads': 10, 'video_rate': video_rate}
+            self.logger.warning('This is a slow video!')
 
         return info
 
