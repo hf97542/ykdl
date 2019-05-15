@@ -3,6 +3,7 @@
 
 from __future__ import print_function
 import os
+import sys
 import subprocess
 import shlex
 from logging import getLogger
@@ -21,7 +22,7 @@ else:
     # Used in Windows CreateProcess is 32K
     ARG_MAX = 32 * 1024
 
-def launch_player(player, urls, **args):
+def launch_player(player, urls, ext, **args):
     if ' ' in player:
         cmd = shlex.split(player, posix=posix)
         if not posix:
@@ -30,16 +31,18 @@ def launch_player(player, urls, **args):
         cmd = [player]
 
     if 'mpv' in cmd[0]:
-        cmd += ['--demuxer-lavf-o', 'protocol_whitelist=[file,tcp,http]']
+        if ext == 'm3u8' and any(os.path.isfile(url) for url in urls):
+            cmd += ['--demuxer-lavf-o', 'protocol_whitelist=[file,http,https,tls,rtp,tcp,udp,crypto,httpproxy]']
         if args['ua']:
             cmd += ['--user-agent', args['ua']]
         if args['referer']:
             cmd += ['--referrer', args['referer']]
         if args['title']:
-            cmd += ['--force-media-title', args['title']]
+            cmd += ['--force-media-title', encode_for_wrap(args['title'], 'ignore')]
         if args['header']:
             cmd += ['--http-header-fields', args['header']]
 
+    urls = [encode_for_wrap(url) for url in urls]
     if args['rangefetch']:
         urls = ['http://127.0.0.1:8806/' + url for url in urls]
         cmds = split_cmd_urls(cmd, urls)
@@ -78,22 +81,51 @@ def split_cmd_urls(cmd, urls):
         cmds = [_cmd]
     return cmds
 
+def encode_for_wrap(string, errors='strict'):
+    sys_code = sys.getfilesystemencoding()
+    if isinstance(string, type(u'')):
+        if isinstance(string, str):
+            string = string.encode(sys_code, errors).decode(sys_code)
+        else:
+            string = string.encode(sys_code, errors)
+    # ignore str in py2, bytes in py3
+    return string
+
 def launch_ffmpeg(basename, ext, lenth):
-    #build input
-    inputfile = compact_tempfile(mode='w+t', suffix='.txt', dir='.', encoding='utf-8')
-    for i in range(lenth):
-        inputfile.write('file \'%s_%d_.%s\'\n' % (basename, i, ext))
-    inputfile.flush()
+    if ext in ['ts', 'mpg', 'mpeg']:
+        inputfile = []
+        for i in range(lenth):
+            inputfile.append('%s_%d_.%s' % (basename, i, ext))
+        inputfile = 'concat:%s' % '|'.join(inputfile)
 
-    outputfile = basename+ '.' + ext
+        if ext == 'ts':
+            ext = 'mp4'
+        outputfile = basename + '.' + ext
 
-    cmd = ['ffmpeg','-f', 'concat', '-safe', '-1', '-y', '-i', inputfile.name, '-c', 'copy', '-hide_banner']
-    if ext == 'mp4':
-        cmd += ['-absf', 'aac_adtstoasc']
+        cmd = ['ffmpeg', '-y', '-i', inputfile, '-c', 'copy', '-hide_banner']
+    else:
+        #build input
+        inputfile = compact_tempfile(mode='w+t', suffix='.txt', dir='.', encoding='utf-8')
+        for i in range(lenth):
+            inputfile.write('file \'%s_%d_.%s\'\n' % (basename, i, ext))
+        inputfile.flush()
+
+        outputfile = basename + '.' + ext
+
+        cmd = ['ffmpeg', '-safe', '-1', '-y', '-f', 'concat', '-i', inputfile.name, '-c', 'copy', '-hide_banner']
+        if ext == 'mp4':
+            cmd += ['-bsf:a', 'aac_adtstoasc']
 
     cmd.append(outputfile)
     print('Merging video %s using ffmpeg:' % basename)
     subprocess.call(cmd)
+
+    if os.name == 'nt':
+        try:
+            inputfile.close()
+            os.remove(inputfile.name)
+        except:
+            pass
 
 def launch_ffmpeg_download(url, name, live):
     print('Now downloading: %s' % name)
@@ -102,9 +134,10 @@ def launch_ffmpeg_download(url, name, live):
 
     cmd = ['ffmpeg', '-y']
 
-    if not url.startswith('http'):
-       cmd += ['-protocol_whitelist', 'file,tcp,http' ]
+    url = encode_for_wrap(url)
+    if os.path.isfile(url):
+       cmd += ['-protocol_whitelist', 'file,http,https,tls,rtp,tcp,udp,crypto,httpproxy']
 
-    cmd += ['-i', url, '-c', 'copy', '-absf', 'aac_adtstoasc',  '-hide_banner', name]
+    cmd += ['-i', url, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-hide_banner', name]
 
     subprocess.call(cmd)

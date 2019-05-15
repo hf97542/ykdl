@@ -7,7 +7,8 @@ from ykdl.util.match import match1, matchall
 from .bilibase import BiliBase, sign_api_url
 
 
-SECRETKEY = '1c15888dc316e05a15fdd0a02ed6584f'
+APPKEY = 'iVGUTjsxvpLeuDCf'
+SECRETKEY = 'aHRmhWMLkdeMuILqORnYZocwMBpMEOdt'
 api_url = 'https://interface.bilibili.com/v2/playurl'
 
 class BiliVideo(BiliBase):
@@ -31,15 +32,15 @@ class BiliVideo(BiliBase):
                if page == page_index:
                    vid = cid
                    if len(video_list) > 1:
-                       title = '{} - {} - {}'.format(title, page, part)
+                       title = u'{} - {} - {}'.format(title, page, part)
                    elif part:
-                       title = '{} - {}'.format(title, part)
+                       title = u'{} - {}'.format(title, part)
                    break
 
         return vid, title
 
     def get_api_url(self, qn):
-        params_str = 'cid={}&player=1&qn={}'.format(self.vid, qn)
+        params_str = 'appkey={}&cid={}&player=0&qn={}'.format(APPKEY, self.vid, qn)
         return sign_api_url(api_url, params_str, SECRETKEY)
 
     def prepare_list(self):

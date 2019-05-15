@@ -7,8 +7,9 @@ from ykdl.util.html import get_content, get_location
 from ykdl.util.match import match1, matchall
 
 import json
+import random
 
-api_url = 'https://api.live.bilibili.com/api/playurl'
+api_url = 'https://api.live.bilibili.com/room/v1/Room/playUrl'
 api1_url = 'https://api.live.bilibili.com/room/v1/Room/room_init'
 api2_url = 'https://api.live.bilibili.com/room/v1/Room/get_info'
 
@@ -29,7 +30,11 @@ class BiliLive(VideoExtractor):
 
         def get_live_info(q=0):
             data = json.loads(get_content("{}?player=1&cid={}&quality={}&otype=json".format(api_url, self.vid, q)))
-            urls = [data["durl"][0]["url"]]
+
+            assert data["code"] == 0, data["msg"]
+
+            data = data["data"]
+            urls = [random.choice(data["durl"])["url"]]
             qlt = data['current_quality']
             aqlts = [int(x) for x in data['accept_quality']]
             size = float('inf')
